@@ -1,90 +1,59 @@
-from flask import Flask
-from flask_socketio import SocketIO, emit
+import os
 import paramiko
-import threading
-import time
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 
-app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
-
-
-@app.route("/")
-def index():
-    return "Backend running"
+app = FastAPI()
 
 
-@socketio.on("connect")
-def handle_connect():
-    print("Client connected")
+# Serve a simple health check
+@app.get("/")
+async def root():
+    return {"message": "Backend is running"}
 
 
-@socketio.on("disconnect")
-def handle_disconnect():
-    print("Client disconnected")
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    print("WebSocket connected")
 
+    # Placeholder: Replace with your Mac's details (use env vars in production!)
+    ssh_host = os.getenv(
+        "SSH_HOST", "your-mac-ip-or-hostname"
+    )  # e.g., '192.168.1.100' or public IP
+    ssh_port = int(os.getenv("SSH_PORT", 22))
+    ssh_user = os.getenv("SSH_USER", "your-mac-username")
+    ssh_password = os.getenv(
+        "SSH_PASSWORD", "your-mac-password"
+    )  # Use private_key instead for security
+    # For key-based auth: ssh_private_key = paramiko.RSAKey.from_private_key_file('/path/to/private/key')
 
-@socketio.on("connect_ssh")
-def handle_connect_ssh(data):
-    host = data["host"]
-    port = data.get("port", 22)
-    username = data["username"]
-    password = data.get("password", "")
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(
-            hostname=host, port=port, username=username, password=password, timeout=10
-        )
+            ssh_host, port=ssh_port, username=ssh_user, password=ssh_password
+        )  # Or key=ssh_private_key
+        print("SSH connected")
+        channel = client.invoke_shell()
 
-        emit("ready", "Connected to SSH server")
-
-        # Open interactive shell with proper PTY
-        channel = client.invoke_shell(term="xterm-256color", width=100, height=30)
-        channel.settimeout(0.0)  # Non-blocking mode
-
-        # Send initial newline to trigger banner and prompt
-        channel.send("\n")
-
-        def read_output():
-            while not channel.exit_status_ready():
-                try:
-                    if channel.recv_ready():
-                        output = channel.recv(4096).decode("utf-8", errors="ignore")
-                        if output:
-                            emit("data", output)
-                except Exception:
-                    pass
-                time.sleep(0.05)  # Small delay to avoid 100% CPU
-
-            emit("close", "Connection closed.")
-
-        threading.Thread(target=read_output, daemon=True).start()
-
-        @socketio.on("input")
-        def handle_input(input_data):
-            if channel.send_ready():
-                channel.send(input_data)
-
-        @socketio.on("resize")
-        def handle_resize(dims):
+        # Relay data between WebSocket and SSH channel
+        while True:
             try:
-                channel.resize_pty(width=dims["cols"], height=dims["rows"])
-            except Exception:
-                pass
+                data = await websocket.receive_text()
+                channel.send(data)
+            except WebSocketDisconnect:
+                break
 
-        @socketio.on("disconnect")
-        def cleanup():
-            channel.close()
-            client.close()
+            if channel.recv_ready():
+                output = channel.recv(1024).decode("utf-8")
+                await websocket.send_text(output)
 
-    except paramiko.AuthenticationException:
-        emit("error", "Authentication failed - check username/password")
-    except paramiko.SSHException as e:
-        emit("error", f"SSH error: {str(e)}")
     except Exception as e:
-        emit("error", f"Connection error: {str(e)}")
-
-
-if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000)
+        await websocket.send_text(f"SSH connection error: {str(e)}")
+    finally:
+        channel.close()
+        client.close()
+        await websocket.close()
+        print("Connections closed")
