@@ -40,7 +40,8 @@ def handle_connect_ssh(data):
         emit("ready", "Connected!")
 
         # Open interactive shell
-        channel = client.invoke_shell()
+        channel = client.invoke_shell(term="xterm-256color", width=80, height=24)
+        channel.send("\n")  # Send initial newline to trigger banner/prompt
 
         # Thread to read output from SSH and send to client
         def read_output():
