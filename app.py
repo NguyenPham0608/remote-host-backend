@@ -1,79 +1,86 @@
 import os
 import paramiko
 import asyncio
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-app = FastAPI(
-    title="My Web SSH Backend",
-    description="Secure WebSocket proxy for SSH",
-    version="1.0",
-)
+app = FastAPI()
 
 
 @app.get("/")
 def root():
-    return {"message": "Backend is running - connect via WebSocket at /ws"}
+    return {"message": "Backend is running - WebSocket at /ws"}
 
 
 @app.websocket("/ws")
-async def ssh_websocket(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("WebSocket connection established")
+    print("WebSocket accepted")
 
     ssh_host = os.getenv("SSH_HOST")
     ssh_port = int(os.getenv("SSH_PORT", "22"))
     ssh_user = os.getenv("SSH_USER")
     ssh_password = os.getenv("SSH_PASSWORD")
 
-    if not ssh_host or not ssh_user:
-        await websocket.send_text(
-            "Error: SSH_HOST and SSH_USER env vars required on Render"
-        )
+    if not all([ssh_host, ssh_user]):
+        try:
+            await websocket.send_text(
+                "Error: Missing SSH_HOST and SSH_USER env vars on Render"
+            )
+        except:
+            pass
         await websocket.close()
         return
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
+    client = None
+    channel = None
     try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(
             hostname=ssh_host,
             port=ssh_port,
             username=ssh_user,
             password=ssh_password,
-            timeout=15,
+            timeout=10,
         )
-        channel = client.invoke_shell(term="xterm-256color", width=120, height=40)
+
+        channel = client.invoke_shell(term="xterm-256color", width=120, height=30)
         channel.settimeout(0.0)
-        channel.send("\n")  # Trigger initial banner
+        channel.send("\n")  # Trigger banner
 
-        print(f"SSH connected to {ssh_host}")
+        print("SSH connected")
 
-        async def send_output():
-            while True:
-                if channel.recv_ready():
-                    data = channel.recv(4096)
-                    if not data:
-                        break
-                    await websocket.send_bytes(data)
-                await asyncio.sleep(0.01)
-
-        async def receive_input():
-            while True:
-                try:
-                    message = await websocket.receive_text()
-                    channel.send(message.encode("utf-8"))
-                except Exception:
+        while True:
+            if channel.recv_ready():
+                data = channel.recv(4096)
+                if not data:
                     break
+                await websocket.send_bytes(data)
 
-        await asyncio.gather(send_output(), receive_input())
+            try:
+                data = await asyncio.wait_for(websocket.receive_bytes(), timeout=0.1)
+                channel.send(data)
+            except asyncio.TimeoutError:
+                pass
+            except WebSocketDisconnect:
+                print("Client disconnected")
+                break
 
+    except paramiko.AuthenticationException:
+        await websocket.send_text(
+            "SSH Authentication failed - check username/password env vars"
+        )
+    except paramiko.SSHException as e:
+        await websocket.send_text(f"SSH Connection failed: {str(e)}")
     except Exception as e:
-        error_msg = f"SSH Connection Failed: {str(e)}"
-        print(error_msg)
-        await websocket.send_text(error_msg)
+        await websocket.send_text(f"Unexpected error: {str(e)}")
     finally:
-        channel.close()
-        client.close()
-        await websocket.close()
-        print("SSH and WebSocket closed")
+        if channel:
+            channel.close()
+        if client:
+            client.close()
+        try:
+            await websocket.close()
+        except:
+            pass
+        print("Cleanup complete")
