@@ -1,38 +1,42 @@
 import os
 import paramiko
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket
 
-app = FastAPI()
+app = FastAPI(
+    title="My Web SSH Backend",
+    description="WebSocket proxy for SSH access",
+    version="1.0",
+)
 
 
 @app.get("/")
-def root():
-    return {"message": "Backend is running - ready for WebSocket SSH at /ws"}
+async def root():
+    return {"message": "Backend is running - connect via WebSocket at /ws"}
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_ssh(websocket: WebSocket):
     await websocket.accept()
-    print("WebSocket accepted")
+    print("WebSocket connection accepted")
 
     ssh_host = os.getenv("SSH_HOST")
-    ssh_port = int(os.getenv("SSH_PORT", 22))
+    ssh_port = int(os.getenv("SSH_PORT", "22"))
     ssh_user = os.getenv("SSH_USER")
     ssh_password = os.getenv("SSH_PASSWORD")
 
     if not ssh_host or not ssh_user:
         await websocket.send_text(
-            "Error: Missing SSH configuration (check Render env vars)"
+            "Error: Missing SSH_HOST and SSH_USER env vars on Render"
         )
         await websocket.close()
         return
 
-    client = None
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
     channel = None
     try:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(
             hostname=ssh_host,
             port=ssh_port,
@@ -44,41 +48,30 @@ async def websocket_endpoint(websocket: WebSocket):
         channel.settimeout(0.0)
         channel.send("\n")  # Trigger banner
 
-        print("SSH connected successfully")
+        print("SSH connected")
 
         while True:
-            # Check for SSH output
             if channel.recv_ready():
                 data = channel.recv(4096)
-                if not data:
-                    break
-                await websocket.send_bytes(data)
+                if data:
+                    await websocket.send_bytes(data)
 
-            # Check for client input
             try:
-                data = await asyncio.wait_for(websocket.receive_bytes(), timeout=0.1)
-                channel.send(data)
+                message = await asyncio.wait_for(websocket.receive_bytes(), timeout=0.1)
+                channel.send(message)
             except asyncio.TimeoutError:
                 pass
-            except WebSocketDisconnect:
-                print("WebSocket disconnected gracefully")
+            except:
                 break
 
-    except paramiko.AuthenticationException:
-        await websocket.send_text("Authentication failed - check username/password")
-    except paramiko.SSHException as e:
-        await websocket.send_text(f"SSH error: {str(e)}")
     except Exception as e:
-        await websocket.send_text(f"Connection error: {str(e)}")
+        await websocket.send_text(f"SSH Error: {str(e)}")
     finally:
-        if channel is not None:
+        if channel:
             channel.close()
-        if client is not None:
-            client.close()
+        client.close()
         try:
             await websocket.close()
-        except RuntimeError:
-            print("Close already in progress - skipping")
-        except Exception:
+        except:
             pass
-        print("Cleanup complete")
+        print("Connections closed")
