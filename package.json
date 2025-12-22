@@ -1,0 +1,25 @@
+{
+  "name": "remote-host-backend",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NguyenPham0608/remote-host-backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/NguyenPham0608/remote-host-backend/issues"
+  },
+  "homepage": "https://github.com/NguyenPham0608/remote-host-backend#readme",
+  "description": "",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
+    "ssh2": "^1.17.0"
+  }
+}
