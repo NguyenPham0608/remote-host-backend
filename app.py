@@ -5,7 +5,7 @@ import socket  # For error handling
 import threading  # To manage streams
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*")  # Allow your GitHub Pages origin
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 
 @app.route("/")
