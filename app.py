@@ -1,59 +1,71 @@
 import os
 import paramiko
+import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
 
-# Serve a simple health check
 @app.get("/")
-async def root():
-    return {"message": "Backend is running"}
+def root():
+    return {"message": "Backend is running - ready for WebSocket SSH at /ws"}
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("WebSocket connected")
+    print("WebSocket client connected")
 
-    # Placeholder: Replace with your Mac's details (use env vars in production!)
-    ssh_host = os.getenv(
-        "SSH_HOST", "your-mac-ip-or-hostname"
-    )  # e.g., '192.168.1.100' or public IP
-    ssh_port = int(os.getenv("SSH_PORT", 22))
-    ssh_user = os.getenv("SSH_USER", "your-mac-username")
-    ssh_password = os.getenv(
-        "SSH_PASSWORD", "your-mac-password"
-    )  # Use private_key instead for security
-    # For key-based auth: ssh_private_key = paramiko.RSAKey.from_private_key_file('/path/to/private/key')
+    ssh_host = os.getenv("SSH_HOST")
+    ssh_port = int(os.getenv("SSH_PORT", "22"))
+    ssh_user = os.getenv("SSH_USER")
+    ssh_password = os.getenv("SSH_PASSWORD")
+
+    if not all([ssh_host, ssh_user]):
+        await websocket.send_text(
+            "Error: Missing SSH configuration (set env vars on Render)"
+        )
+        await websocket.close()
+        return
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
         client.connect(
-            ssh_host, port=ssh_port, username=ssh_user, password=ssh_password
-        )  # Or key=ssh_private_key
-        print("SSH connected")
-        channel = client.invoke_shell()
+            hostname=ssh_host,
+            port=ssh_port,
+            username=ssh_user,
+            password=ssh_password,
+            timeout=10,
+        )
+        channel = client.invoke_shell(term="xterm-256color", width=100, height=30)
+        channel.settimeout(0.0)
+        channel.send("\n")  # Trigger initial banner/prompt
 
-        # Relay data between WebSocket and SSH channel
         while True:
+            # Check for SSH output first
+            if channel.recv_ready():
+                output = channel.recv(4096).decode("utf-8", errors="ignore")
+                if output:
+                    await websocket.send_text(output)
+
+            # Check for client input
             try:
-                data = await websocket.receive_text()
-                channel.send(data)
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
+                if data:
+                    channel.send(data)
+            except asyncio.TimeoutError:
+                pass
             except WebSocketDisconnect:
+                print("WebSocket disconnected")
                 break
 
-            if channel.recv_ready():
-                output = channel.recv(1024).decode("utf-8")
-                await websocket.send_text(output)
-
     except Exception as e:
-        await websocket.send_text(f"SSH connection error: {str(e)}")
+        await websocket.send_text(f"SSH Error: {str(e)}")
     finally:
-        channel.close()
+        if "channel" in locals():
+            channel.close()
         client.close()
         await websocket.close()
-        print("Connections closed")
+        print("SSH and WebSocket closed")
