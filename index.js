@@ -9,35 +9,69 @@ app.use(express.json());
 const PORT = process.env.PORT || 5000;
 
 app.post('/connect', (req, res) => {
-    const { host, username, password, command } = req.body; // Added command
+    const { host, username, password, command, cwd } = req.body;
     const conn = new Client();
 
+    // Clean up the host string (removes brackets from IPv6 if present)
+    const cleanHost = host ? host.replace(/[\[\]]/g, '') : '';
+
     conn.on('ready', () => {
-        // We execute whatever command the user typed in the UI
-        conn.exec(command || 'ls -la', (err, stream) => {
-            if (err) return res.status(500).json({ error: err.message });
+        /**
+         * The Logic:
+         * 1. Move to the directory the user was last in (cwd)
+         * 2. Execute the user's command
+         * 3. Print a unique delimiter
+         * 4. Run 'pwd' to see where we ended up (in case they used 'cd')
+         */
+        const chainedCommand = `cd ${cwd || '~'} && ${command} && echo "---CWD_DELIMITER---" && pwd`;
+
+        conn.exec(chainedCommand, (err, stream) => {
+            if (err) {
+                conn.end();
+                return res.status(500).json({ error: err.message });
+            }
 
             let data = '';
             let stderr = '';
+
             stream.on('data', (d) => { data += d; });
-            stream.on('stderr', (d) => { stderr += d; }); // Catch errors like "File not found"
-            stream.on('close', () => {
+            stream.on('stderr', (d) => { stderr += d; });
+
+            stream.on('close', (code) => {
+                const fullOutput = data.toString();
+
+                // Split output by our custom delimiter to find the new path
+                const parts = fullOutput.split("---CWD_DELIMITER---");
+                const commandOutput = parts[0].trim();
+                const newPath = parts[1] ? parts[1].trim() : (cwd || '~');
+
                 res.json({
-                    output: data || stderr || "Command executed (no output)."
+                    output: commandOutput || stderr || (code === 0 ? "" : "Command failed"),
+                    newPath: newPath,
+                    exitCode: code
                 });
+
                 conn.end();
             });
         });
     }).on('error', (err) => {
+        console.error('SSH Connection Error:', err.message);
         res.status(500).json({ error: "Connection failed: " + err.message });
     }).connect({
-        host: host.replace(/[\[\]]/g, ''),
+        host: cleanHost,
         port: 22,
-        username,
-        password,
-        family: 6,
-        readyTimeout: 15000
+        username: username,
+        password: password,
+        family: 6,           // Supports both IPv4 and IPv6
+        readyTimeout: 30000, // 30 seconds to prevent handshake timeouts on slow networks
+        keepaliveInterval: 1000,
+        keepaliveCountMax: 3
     });
 });
 
-app.listen(PORT, () => console.log(`Backend PoC running on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`----------------------------------------`);
+    console.log(`Terminal Backend PoC Live on Port ${PORT}`);
+    console.log(`Ready for SSH commands...`);
+    console.log(`----------------------------------------`);
+});
